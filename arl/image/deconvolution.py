@@ -208,6 +208,80 @@ def deconvolve_cube(dirty: Image, psf: Image, **kwargs) -> (Image, Image):
     
     return comp_image, residual_image
 
+def deconvolve_cube_sumfacet(dirty: Image, psf: Image, **kwargs) -> (Image, Image):
+    psf_support = get_parameter(kwargs, 'psf_support', None)
+    if isinstance(psf_support, int):
+        if (psf_support < psf.shape[2] // 2) and ((psf_support < psf.shape[3] // 2)):
+            centre = [psf.shape[2] // 2, psf.shape[3] // 2]
+            psf.data = psf.data[..., (centre[0] - psf_support):(centre[0] + psf_support),
+                       (centre[1] - psf_support):(centre[1] + psf_support)]
+            log.info('deconvolve_cube: PSF support = +/- %d pixels' % (psf_support))
+
+
+    log.info("deconvolve_cube: Multi-scale multi-frequency clean of each polarisation separately")
+    nmoments = get_parameter(kwargs, "nmoments", 3)
+    assert nmoments > 0, "Number of frequency moments must be greater than zero"
+    # 此处应该sumfacet阶段的实际实现？？
+    dirty_taylor = calculate_image_frequency_moments(dirty, nmoments=nmoments)
+    psf_taylor = calculate_image_frequency_moments(psf, nmoments=2 * nmoments)
+
+    return dirty_taylor, psf_taylor
+
+def deconvolve_cube_identify():
+    pass
+
+def deconvolve_cube_subimacom(dirty: Image, dirty_taylor: Image, psf_taylor: Image, **kwargs):
+    window = get_parameter(kwargs, 'window', None)
+    if window == 'quarter':
+        qx = dirty.shape[3] // 4
+        qy = dirty.shape[2] // 4
+        window = numpy.zeros_like(dirty.data)
+        window[..., (qy + 1):3 * qy, (qx + 1):3 * qx] = 1.0
+        log.info('deconvolve_cube: Cleaning inner quarter of each sky plane')
+    else:
+        window = None
+
+    findpeak = get_parameter(kwargs, "findpeak", 'ARL')
+    gain = get_parameter(kwargs, 'gain', 0.7)
+    assert 0.0 < gain < 2.0, "Loop gain must be between 0 and 2"
+    thresh = get_parameter(kwargs, 'threshold', 0.0)
+    assert thresh >= 0.0
+    niter = get_parameter(kwargs, 'niter', 100)
+    assert niter > 0
+    scales = get_parameter(kwargs, 'scales', [0, 3, 10, 30])
+    fracthresh = get_parameter(kwargs, 'fractional_threshold', 0.1)
+    assert 0.0 < fracthresh < 1.0
+
+    comp_array = numpy.zeros(dirty_taylor.data.shape)
+    residual_array = numpy.zeros(dirty_taylor.data.shape)
+    for pol in range(dirty_taylor.data.shape[1]):
+        if psf_taylor.data[0, pol, :, :].max():
+            log.info("deconvolve_cube: Processing pol %d" % (pol))
+            if window is None:
+                comp_array[:, pol, :, :], residual_array[:, pol, :, :] = \
+                    msmfsclean(dirty_taylor.data[:, pol, :, :], psf_taylor.data[:, pol, :, :],
+                               None, gain, thresh, niter, scales, fracthresh, findpeak)
+            else:
+                comp_array[:, pol, :, :], residual_array[:, pol, :, :] = \
+                    msmfsclean(dirty_taylor.data[:, pol, :, :], psf_taylor.data[:, pol, :, :],
+                               window[:, pol, :, :], gain, thresh, niter, scales, fracthresh, findpeak)
+        else:
+            log.info("deconvolve_cube: Skipping pol %d" % (pol))
+
+    comp_image = create_image_from_array(comp_array, dirty_taylor.wcs)
+    residual_image = create_image_from_array(residual_array, dirty_taylor.wcs)
+
+    return_moments = get_parameter(kwargs, "return_moments", False)
+    if not return_moments:
+        log.info("Deconvolve_cube: calculating spectral cubes")
+        comp_image = calculate_image_from_frequency_moments(dirty, comp_image)
+        residual_image = calculate_image_from_frequency_moments(dirty, residual_image)
+    else:
+        log.info("Deconvolve_cube: constructed moment cubes")
+
+    return comp_image, residual_image
+
+
 
 
 def restore_cube(model: Image, psf: Image, residual=None, **kwargs) -> Image:

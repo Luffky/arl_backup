@@ -236,9 +236,9 @@ def subimacom_handle(sum_facets, identify_component):
 			dep_sum_facets[(beam, major_loop, frequency, 0, facet, polarisation)] = (beam, major_loop, frequency, facet)
 		dep_identify_component[(beam, major_loop, frequency, facet)] = (beam, major_loop, frequency, facet)
 	input_identify_component = identify_component.flatMap(lambda ix_data: map(lambda x: (x, ix_data[1]), dep_identify_component[ix_data[0]]))
-	input_sum_facets = identify_component.flatMap(lambda ix_data: map(lambda  x: (x, ix_data[1]), dep_sum_facets[ix_data[0]]))
+	input_sum_facets = sum_facets.flatMap(lambda ix_data: map(lambda  x: (x, ix_data[1]), dep_sum_facets[ix_data[0]]))
 	partitioner = MapPartitioner(partitions)
-	return input_identify_component.partitionBy(len(partitions), partitioner).cogroup(input_sum_facets.partitionBy(len(partitions), partitioner)).mapPartitions(subimacom_kernel)
+	return input_identify_component.partitionBy(len(partitions), partitioner).cogroup(input_sum_facets).mapPartitions(subimacom_kernel)
 
 def update_lsm_handle(local_sky_model, source_find):
 	partitions = defaultdict(int)
@@ -611,10 +611,14 @@ def serialize_program():
     blockvis_observed.data['vis'] = blockvis_observed.data['vis'] - model_vis.data['vis']
     visibility = coalesce_visibility(blockvis_observed)  # 空的image，接受visibility的invert
     result.append(visibility)
-	#---backwards_module---#
+    #---backwards_module---#
     image = create_image(metadata.NY, metadata.NX, frequency=frequency, phasecentre=phasecentre, cellsize=0.001,
                          polarisation_frame=metadata.create_polarisation_frame())
     image, wt = invert_facets(visibility, image, facets=metadata.FACETS)
+
+    psf_image = create_image(metadata.NY, metadata.NX, frequency=frequency, phasecentre=phasecentre, cellsize=0.001,
+                             polarisation_frame=metadata.create_polarisation_frame())
+    psf_image, psf_wt = invert_facets(visibility, psf_image, dopsf=True, facets=metadata.FACETS)
 
     dirty_image = Image()
     dirty_image.wcs = image.wcs
@@ -623,9 +627,7 @@ def serialize_program():
     result.append(dirty_image)
 
     #---deconvolution_module---#
-    psf_image = create_image(metadata.NY, metadata.NX, frequency=frequency, phasecentre=phasecentre, cellsize=0.001,
-                         polarisation_frame=metadata.create_polarisation_frame())
-    psf_image, psf_wt = invert_facets(visibility, psf_image, dopsf=True, facets=metadata.FACETS)
+
 
     comp_image, residual_image = deconvolve_cube(image, psf_image, algorithm="mfsmsclean")
     result.append((comp_image, residual_image))
