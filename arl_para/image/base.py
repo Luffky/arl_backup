@@ -29,6 +29,7 @@ def create_image_from_array_para(im , y1:int, y2:int, x1:int, x2:int, beam, majo
     assert type(fim) == image_for_para, "Type is %s" % type(fim)
     return fim
 
+
 def image_make_facets(im: image_for_para, facets: int):
     '''
         将image切分为facets * facets个小image的生成器

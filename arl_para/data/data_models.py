@@ -109,6 +109,7 @@ class visibility_for_para:
         print(self.vis)
         return ""
 
+
 class visibility_share:
     '''
         被并行化后的visibility的共享数据
@@ -167,10 +168,10 @@ class image_for_para:
     def polarisation(self): return self.keys['polarisation']
 
     @property
-    def ny(self): return self.data.shape[0]
+    def ny(self): return self.data.shape[-2]
 
     @property
-    def nx(self): return self.data.shape[1]
+    def nx(self): return self.data.shape[-1]
 
     @property
     def shape(self):
@@ -179,7 +180,6 @@ class image_for_para:
     @property
     def phasecentre(self):
         return SkyCoord(self.wcs.wcs.crval[0] * u.deg, self.wcs.wcs.crval[1] * u.deg)
-
 
 
 class image_share:
@@ -201,29 +201,9 @@ class image_share:
 
 
 class GainTable:
-    """ Gain table with data: time, antenna, gain[:, chan, rec, rec], weight columns
-
-    The weight is usually that output from gain solvers.
-    """
-
     def __init__(self, data=None, gain: numpy.array = None, time: numpy.array = None, weight: numpy.array = None,
                  residual: numpy.array = None, frequency: numpy.array = None,
                  receptor_frame: ReceptorFrame = ReceptorFrame("linear")):
-        """ Create a gaintable from arrays
-
-        The definition of gain is:
-
-            Vobs = g_i g_j^* Vmodel
-
-        :param data:
-        :param gain: [:, nchan, nrec, nrec]
-        :param time:
-        :param weight:
-        :param residual:
-        :param frequency:
-        :param receptor_frame:
-        :return: Gaintable
-        """
         if data is None and gain is not None:
             nrec = receptor_frame.nrec
             nrows = gain.shape[0]

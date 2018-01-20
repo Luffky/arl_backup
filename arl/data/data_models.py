@@ -619,7 +619,6 @@ def assert_same_chan_pol(o1, o2):
         "%s and %s have different number of channels: %d != %d" % \
         (type(o1).__name__, type(o2).__name__, o1.nchan, o2.nchan)
 
-
 def assert_vis_gt_compatible(vis: Union[Visibility, BlockVisibility], gt: GainTable):
     """ Check if visibility and gaintable are compatible
     

@@ -205,7 +205,6 @@ def insert_skycomponent(im: Image, sc: Union[Skycomponent, List[Skycomponent]], 
     :return: image
 
     """
-    # TODO have modified to parallel version
     assert type(im) == Image
     
     support=int(support/bandwidth)

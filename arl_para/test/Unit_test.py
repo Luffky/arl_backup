@@ -18,7 +18,7 @@ from arl_para.solve.solve import *
 from arl_para.fourier_transforms.fft_support import fft as arl_para_fft
 from arl.fourier_transforms.fft_support import fft as arl_fft
 from arl_para.imaging.invert import *
-
+from pipeline_partitioning_auto_2 import parse_console_arg
 import numpy as np
 
 lowcore = create_named_configuration('LOWBD2-CORE')
@@ -34,7 +34,9 @@ compabsdirection = SkyCoord(ra=17.0 * u.deg, dec=-36.5 * u.deg, frame='icrs', eq
 comp = create_skycomponent(flux=flux, frequency=frequency, direction=compabsdirection,
                            polarisation_frame=PolarisationFrame('linear'))  # flux [2,4]
 
-
+scale = parse_console_arg()
+print(scale)
+metadata = MetaData(nan=scale["nan"], nchan=scale["nchan"], npix=scale["npix"], nfacet=scale["nfacet"], ntime=scale["ntime"])
 
 class TestFunction(unittest.TestCase):
     # def test_visibility_base(self):

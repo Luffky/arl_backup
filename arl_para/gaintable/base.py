@@ -7,16 +7,7 @@ from arl_para.test.Utils import compute_baseline_index
 
 def create_gaintable_from_visibility_para(vis: Visibility, time_width: float = None,
                                           frequency_width: float = None, **kwargs) -> GainTable:
-    """ Create gain table from visibility.
 
-    This makes an empty gain table consistent with the BlockVisibility.
-
-    :param vis: BlockVisibilty
-    :param time_width: Time interval between solutions (s)
-    :param frequency_width: Frequency solution width (Hz)
-    :return: GainTable
-
-    """
     utimes = np.unique(vis.time)
     uant = np.unique(vis.antenna1)
     ufrequency = np.unique(vis.frequency)
@@ -96,7 +87,6 @@ def apply_gaintable_para(vis: visibility_for_para, gt:GainTable, chan, inverse=F
 
 
         # The shape of the mueller matrix is
-        ntimes, nant, nchan, nrec, _ = gain.shape
         ntimes, nant, nchan, nrec, _ = gain.shape
         visnant = len(numpy.unique(vis.antenna1)) + 1
 

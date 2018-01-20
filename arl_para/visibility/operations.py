@@ -4,6 +4,7 @@ from arl_para.Others.utils import *
 import collections
 from typing import List, Union
 from arl_para.test.Utils import compute_baseline_index
+from arl.visibility.coalesce import average_in_blocks
 
 def phaserotate_visibility_para(vis: visibility_for_para, newphasecentre: SkyCoord, tangent=True, inverse=False) -> visibility_for_para:
     """
@@ -65,10 +66,6 @@ def predict_skycomponent_visibility_para(vis: visibility_for_para, sc):
     return vis
 
 def sum_visibility_in_one_facet_pol(viss: Union[List[visibility_for_para]]) -> visibility_for_para:
-    npol = 0
-    nvis = 0
-    phasecentre = None
-    keys = None
     if type(viss[0]) == tuple:
         npol = viss[0][1].npol
         nvis = viss[0][1].nvis
@@ -210,9 +207,67 @@ def subtract_visibility(vis: visibility_for_para, modelvis: visibility_for_para)
     vis.data['vis'] = vis.data['vis'] - modelvis.data['vis']
     return vis
 
+def decoalesce_visibility_para(vis: visibility_for_para)->BlockVisibility:
+    nant = np.unique(vis.antenna1).shape[0] + 1
+    nchan = np.unique(vis.frequency).shape[0]
+    npol = vis.npol
+    ntimes = np.unique(vis.time).shape[0]
+    desc = [('uvw', '>f8', (nant, nant, 3)),
+            ('time', '>f8'),
+            ('integration_time', '>f8'),
+            ('vis', '>c16', (nant, nant, nchan, npol)),
+            ('weight', '>f8', (nant, nant, nchan, npol))]
+    data = numpy.zeros(shape=[ntimes], dtype=desc)
+    frequency = np.zeros([nchan])
+    channel_bandwidth = np.zeros([nchan])
+    row = 0
+    for itime in range(ntimes):
+        for a1 in range(nant):
+            for a2 in range(a1 + 1, nant):
+                for chan in range(nchan):
+                    frequency[chan] = vis.frequency[row]
+                    data["time"][itime] = vis.time[row]
+                    data['uvw'][itime, a2, a1, :] = vis.uvw[row, :] * constants.c.value / frequency[chan]
+
+                    data["integration_time"][itime] = vis.integration_time[row]
+                    channel_bandwidth[chan] = vis.channel_bandwidth[row]
+                    data["vis"][itime, a2, a1, chan] = vis.vis[row]
+                    data["weight"][itime, a2, a1, chan] = vis.weight[row]
+                    row += 1
+
+            for a2 in range(nant, a1 + 1):
+                data["vis"][itime, a2, a1, chan] = vis.vis[0]
+                data["weight"][itime, a2, a1, chan] = vis.weight[0]
+
+    ret = BlockVisibility(data=data, frequency=frequency, channel_bandwidth=channel_bandwidth,
+                          phasecentre=vis.phasecentre, configuration=vis.configuration, polarisation_frame=vis.polarisation_frame)
+
+    return ret
+
 def coalesce_visibility_para(vis: visibility_for_para, **kwargs):
-    # 暂不考虑time和frequency的压缩
-    pass
+    time_coal = get_parameter(kwargs, 'time_coal', 0.0)
+    max_time_coal = get_parameter(kwargs, 'max_time_coal', 100)
+    frequency_coal = get_parameter(kwargs, 'frequency_coal', 0.0)
+    max_frequency_coal = get_parameter(kwargs, 'max_frequency_coal', 100)
+    if time_coal == 0.0 and frequency_coal == 0.0:
+        return vis
+
+    else:
+        block_temp = decoalesce_visibility_para(vis)
+        cvis, cuvw, cwts, ctime, cfrequency, cchannel_bandwidth, ca1, ca2, cintegration_time, cindex \
+            = average_in_blocks(block_temp.data['vis'], block_temp.data['uvw'], block_temp.data['weight'], block_temp.time,
+                                block_temp.integration_time, block_temp.frequency, block_temp.channel_bandwidth,
+                                time_coal, max_time_coal, frequency_coal, max_frequency_coal)
+        cimwt = np.ones(cvis.shape)
+        coalesced_vis = visibility_for_para(vis=cvis, uvw=cuvw, time=ctime, frequency=cfrequency, bandwidth=cchannel_bandwidth,
+                                            integration_time=cintegration_time, antenna1=ca1, antenna2=ca2,
+                                            weight=cwts, imaging_weight=cimwt, visibility=vis, nvis=cvis.shape[0])
+        coalesced_vis.blockvis = vis
+        coalesced_vis.keys = vis.keys
+        return coalesced_vis
+
+
+
 
 
 

@@ -1,10 +1,11 @@
 from pyspark import SparkContext, SparkConf, RDD
+from pyspark.streaming import StreamingContext
 from pyspark import util
 import numpy as np
 from collections import defaultdict
 import os
 from arl.util.testing_support import *
-from arl.image.deconvolution import deconvolve_cube
+from arl.image.deconvolution import deconvolve_cube, deconvolve_cube_sumfacet, deconvolve_cube_identify
 from arl.imaging.base import predict_skycomponent_visibility
 from arl_para.image.base import *
 from arl_para.visibility.base import *
@@ -17,14 +18,15 @@ from arl_para.solve.solve import *
 from arl_para.imaging.invert import *
 from arl.imaging.facets import *
 from arl_para.test.Constants import *
+from arl_para.image.deconvolution import *
 import sys, getopt
 
 
 os.environ["PYSPARK_PYTHON"]="/usr/local/bin/python3"
-
 def parse_console_arg():
-    opts, args = getopt.getopt(sys.argv[1:], "a:p:f:c:t:")
-    ret = {"nan":3, "nchan":5, "npix":256, "nfacet":2, "ntime":5}
+    opts, args = getopt.getopt(sys.argv[1:], "a:p:f:c:t:v:")
+    ret = {"nan":3, "nchan":2, "npix":256, "nfacet":2, "ntime":2}
+    is_valid = {"-1": True, "0": False, "1": False, "2": False, "3": False}
     for op, value in opts:
         if op == "-a":
             ret["nan"] = int(value)
@@ -36,11 +38,16 @@ def parse_console_arg():
             ret['ntime'] = int(value)
         elif op == "-c":
             ret['nchan'] = int(value)
-    return ret
+        elif op == "-v":
+            for i in value:
+                is_valid[i] = True
+                is_valid["-1"] = True
 
-scale = parse_console_arg()
+    return ret, is_valid
+
+scale, is_valid = parse_console_arg()
 print(scale)
-metadata = MetaData(nan=scale["nan"], nchan=scale["nchan"], npix=scale["npix"], nfacet=scale["nfacet"], ntime=scale["ntime"])
+metadata = MetaData(nan=scale["nan"], nchan=scale["nchan"], npix=scale["npix"], nfacet=scale["nfacet"], ntime=scale["ntime"], niter=3, precision=-8)
 
 def SDPPartitioner_pharp_alluxio(key):
 	'''
@@ -193,19 +200,52 @@ def sum_facets_handle(grikerupd_pharot_grid_fft_rep):
 			initset.append((beam, major_loop, frequency, time, facet, polarisation))
 	return grikerupd_pharot_grid_fft_rep.map(sum_facets_kernel)
 
-def identify_component_handle(sum_facets):
-	partitions = defaultdict(int)
-	partition = 0
-	dep_sum_facets = defaultdict(list)
-	beam = 0
-	major_loop = 0
-	frequency = 0
-	for facet in range(0, metadata.PIECE):
-		partitions[(beam, major_loop, frequency, facet)] = partition
-		partition += 1
-		for i_polarisation in range(0, metadata.NPOL):
-			dep_sum_facets[(beam, major_loop, frequency, 0, facet, i_polarisation)] = [(beam, major_loop, frequency, facet)]
-	return sum_facets.partitionBy(metadata.PIECE, SDPPartitioner).mapPartitions(identify_component_kernel_partitions)
+def identify_component_handle(sum_facets, sub_imacom, i):
+    partitions = defaultdict(int)
+    partition = 0
+    dep_subimacom = defaultdict(list)
+    dep_sum_facets = defaultdict(list)
+    beam = 0
+    major_loop = 0
+    frequency = 0
+    for facet in range(0, metadata.PIECE):
+        partitions[(beam, major_loop, frequency, facet)] = partition
+        partition += 1
+        for polarisation in range(0, metadata.NPOL):
+            dep_sum_facets[(beam, major_loop, frequency, 0, facet, polarisation)].append((beam, major_loop, frequency, facet))
+        dep_subimacom[(beam, major_loop, frequency, facet)].append((beam, major_loop, frequency, facet))
+
+    input_subimacom = sub_imacom.flatMap(
+        lambda ix_data: map(lambda x: (x, ix_data[1]), dep_subimacom[ix_data[0]]))
+    input_sum_facets = sum_facets.flatMap(
+        lambda ix_data: map(lambda x: (x, ix_data[1]), dep_sum_facets[ix_data[0]]))
+    partitioner = MapPartitioner(partitions)
+
+    return input_subimacom.partitionBy(len(partitions), partitioner).cogroup(input_sum_facets).mapPartitions(lambda x: identify_component_kernel_partitions(x, i))
+
+def subimacom_handle(sum_facets, identify_component, i):
+    partitions = defaultdict(int)
+    partition = 0
+    dep_identify_component = defaultdict(list)
+    dep_sum_facets = defaultdict(list)
+    beam = 0
+    major_loop = 0
+    frequency = 0
+    for facet in range(0, metadata.PIECE):
+        partitions[(beam, major_loop, frequency, facet)] = partition
+        partition += 1
+        for polarisation in range(0, metadata.NPOL):
+            dep_sum_facets[(beam, major_loop, frequency, 0, facet, polarisation)].append((beam, major_loop, frequency, facet))
+        dep_identify_component[(beam, major_loop, frequency, facet)].append((beam, major_loop, frequency, facet))
+    if identify_component != None:
+        input_identify_component = identify_component.flatMap(lambda ix_data: map(lambda x: (x, ix_data[1]), dep_identify_component[ix_data[0]]))
+        input_sum_facets = sum_facets.flatMap(lambda ix_data: map(lambda  x: (x, ix_data[1]), dep_sum_facets[ix_data[0]]))
+        partitioner = MapPartitioner(partitions)
+        return input_identify_component.partitionBy(len(partitions), partitioner).cogroup(input_sum_facets).mapPartitions(lambda x: subimacom_kernel(x, i))
+    else:
+        input_sum_facets = sum_facets.flatMap(lambda ix_data: map(lambda  x: (x, ix_data[1]), dep_sum_facets[ix_data[0]]))
+        partitioner = MapPartitioner(partitions)
+        return input_sum_facets.partitionBy(len(partitions), partitioner).mapPartitions(lambda x: subimacom_kernel(x, i, flag=1))
 
 def source_find_handle(identify_component):
     partitions = defaultdict(int)
@@ -220,25 +260,6 @@ def source_find_handle(identify_component):
     input_identify_component = identify_component.flatMap(lambda ix_data: map(lambda x: (x, ix_data[1]), dep_identify_component[ix_data[0]]))
     partitioner = MapPartitioner(partitions)
     return input_identify_component.partitionBy(len(partitions), partitioner).mapPartitions(source_find_kernel, True)
-
-def subimacom_handle(sum_facets, identify_component):
-	partitions = defaultdict(int)
-	partition = 0
-	dep_identify_component = defaultdict(list)
-	dep_sum_facets = defaultdict(list)
-	beam = 0
-	major_loop = 0
-	frequency = 0
-	for facet in range(0, metadata.PIECE):
-		partitions[(beam, major_loop, frequency, facet)] = partition
-		partition += 1
-		for polarisation in range(0, metadata.NPOL):
-			dep_sum_facets[(beam, major_loop, frequency, 0, facet, polarisation)] = (beam, major_loop, frequency, facet)
-		dep_identify_component[(beam, major_loop, frequency, facet)] = (beam, major_loop, frequency, facet)
-	input_identify_component = identify_component.flatMap(lambda ix_data: map(lambda x: (x, ix_data[1]), dep_identify_component[ix_data[0]]))
-	input_sum_facets = sum_facets.flatMap(lambda ix_data: map(lambda  x: (x, ix_data[1]), dep_sum_facets[ix_data[0]]))
-	partitioner = MapPartitioner(partitions)
-	return input_identify_component.partitionBy(len(partitions), partitioner).cogroup(input_sum_facets).mapPartitions(subimacom_kernel)
 
 def update_lsm_handle(local_sky_model, source_find):
 	partitions = defaultdict(int)
@@ -436,7 +457,7 @@ def timeslots_kernel(ixs):
         modelviss.append(model_vis)
         idxs2.append(idx2)
     gt, x, xwt = solve_gaintable_para(viss, idxs, ix[3], modelviss, idxs2, polarisation_frame=metadata.create_polarisation_frame())
-    label = "Timeslots (1518.3 MB, 0.00 Tflop) " + str(ix).replace(" ", "")
+    label = "Timeslots (1518.3 MB, 0.00 Tflop) "
     result = (ix, (gt, x, xwt))
     print(label + str(ix))
     return result
@@ -445,7 +466,7 @@ def solve_kernel(ixs):
     dix, (gt, x, xwt) = ixs
     ix = dix
     result = (ix, solve_from_X_para(gt, x, xwt, metadata.NPOL, precision=metadata.PRECISION))
-    label = "Solve (8262.8 MB, 16.63 Tflop) " + str(ix).replace(" ", "")
+    label = "Solve (8262.8 MB, 16.63 Tflop) "
     print(label + str(result))
     return result
 
@@ -463,8 +484,8 @@ def cor_subvis_flag_kernel(ixs):
         if idx2[2] == ix[2]:
             model_v = model_vis
     apply_gaintable_para(v, gaintable, ix[2])
-    result = (ix, subtract_visibility(v, model_v))
-    label = "Correct + Subtract Visibility + Flag (153534.1 MB, 4.08 Tflop) " + str(ix).replace(" ", "")
+    result = (ix, coalesce_visibility_para(subtract_visibility(v, model_v), time_coal=metadata.time_coal, frequency_coal=metadata.frequency_coal))
+    label = "Correct + Subtract Visibility + Flag (153534.1 MB, 4.08 Tflop) "
     print(label + str(result))
     return result
 
@@ -474,39 +495,89 @@ def grikerupd_pharot_grid_fft_rep_kernel(ixs):
     beam, major_loop, chan, time, facet, pol = ix
     cix, (conf, times, frequency, channel_bandwidth, phasecentre) = data_telescope_data.value[0]
     imgs = []
+    psf_imgs = []
     for idx, vis in data_cor_subvis_flag.value:
         chan = idx[2]
         image_para = create_image_para_2(metadata.NY // metadata.FACETS, metadata.NX // metadata.FACETS, chan, pol, facet, phasecentre, cellsize=0.001,
                                          polarisation_frame=metadata.create_polarisation_frame(), FACET=metadata.FACETS)
         image_para, wt = invert_facets_para(vis, image_para, FACETS=metadata.FACETS)
+
+        psf_para = create_image_para_2(metadata.NY // metadata.FACETS, metadata.NX // metadata.FACETS, chan, pol, facet, phasecentre, cellsize=0.001,
+                                         polarisation_frame=metadata.create_polarisation_frame(), FACET=metadata.FACETS)
+        psf_para, psf_wt = invert_facets_para(vis, psf_para, dopsf=True, FACETS=metadata.FACETS)
         imgs.append(image_para)
-    result = (ix, imgs)
-    label = "Gridding Kernel Update + Phase Rotation + Grid + FFT + Reprojection (14644.9 MB, 20.06 Tflop) " + str(ix).replace(" ", "")
-    print(label + str(result))
+        psf_imgs.append(psf_para)
+    result = (ix, (imgs, psf_imgs))
+    label = "Gridding Kernel Update + Phase Rotation + Grid + FFT + Reprojection (14644.9 MB, 20.06 Tflop) "
+    print(label + str(result[0]))
     return result
 
 def sum_facets_kernel(ixs):
     input_size = 0
     ix, data = ixs
-    result = None
-    for img in data:
-        if result == None:
-            result = img
-        else:
-            result.data += img.data
-    reuslt = (ix, result)
-    label = "Sum Facets (14644.9 MB, 0.00 Tflop) " + str(ix).replace(" ", "")
+    result = sumfacet(data[0], data[1], metadata.create_wcs(), npol=metadata.NPOL, moments=metadata.MOMENTS)
+    result = (ix, result)
+    label = "Sum Facets (14644.9 MB, 0.00 Tflop) "
     print(label + str(result))
     return result
 
-def identify_component_kernel_partitions(ixs):
-	input_size = 0
-	ix = (0, 0, 0, 0, 0, 0)
-	for dix, data in ixs:
-		ix = dix
-	label = "Identify Component (0.2 MB, 1830.61 Tflop) " + str(ix).replace(" ", "")
-	print(label + " from " + str(input_size / 1000000) + " MB input)")
-	return iter([((ix[0], ix[1], ix[2], ix[4]), result)])
+def identify_component_kernel_partitions(ixs, i):
+    comp = defaultdict(list)
+    residual = defaultdict(list)
+    result = []
+    flag = False
+    ixg = (0, 0, 0, 0)
+    for ix in ixs:
+        ix, (data_subimacom, data_sum_facets) = ix
+        for sub_imacom, sum_facet in zip(data_subimacom, data_sum_facets):
+            temp2 = identify_component(sum_facet[0], sum_facet[1], metadata.create_wcs(), sub_imacom[0], sub_imacom[1],
+                                       sub_imacom[2], sub_imacom[3], sub_imacom[4], sub_imacom[5], sub_imacom[6],
+                                       sub_imacom[7],
+                                       i=i, ny=metadata.NY, nx=metadata.NX, nchan=metadata.NCHAN, niter=metadata.niter)
+            if temp2[0] == False:
+                result.append(((ix[0], ix[1], ix[2], ix[3]), temp2[1:5]))
+
+            else:
+                flag = True
+                comp_images, residual_images = calculate_comp_residual(temp2[1], temp2[2], sum_facet[0], metadata.create_wcs(),
+                                                                       ny=metadata.NY // metadata.FACETS, nx=metadata.NX // metadata.FACETS,
+                                                                       nchan=metadata.NCHAN)
+                for img in comp_images:
+                    comp[img.channel].append(img)
+                for img in residual_images:
+                    residual[img.channel].append(img)
+            ixg = ix
+
+    if flag:
+        for i in comp:
+            result.append(((ixg[0], ixg[1], i, ixg[3]), (comp[i], residual[i])))
+
+    label = "Identify Component (0.2 MB, 1830.61 Tflop) "
+    print(label + str(ixg))
+    return iter(result)
+
+def subimacom_kernel(ixs, i, flag=0):
+    ixg = (0, 0, 0, 0)
+    result = []
+    if flag == 0:
+        for ix in ixs:
+            ix, (data_identify_component, data_sum_facets) = ix
+            ixg = ix
+            for identify, sum_facet in zip(data_identify_component, data_sum_facets):
+                result.append(((ix[0], ix[1], ix[2], ix[3]), subimacom(sum_facet[0], sum_facet[1], metadata.create_wcs(), identify[0], identify[1], identify[2], identify[3],
+                    i=i, ny=metadata.NY, nx=metadata.NX, nchan=metadata.NCHAN, niter=metadata.niter)))
+
+    else:
+        for temp in ixs:
+            ix, data_sum_facets = temp
+            result.append(((ix[0], ix[1], ix[2], ix[3]), subimacom(data_sum_facets[0], data_sum_facets[1], metadata.create_wcs(), None, None, None, None,
+                      i=i, ny=metadata.NY, nx=metadata.NX, nchan=metadata.NCHAN, niter=metadata.niter)))
+            ixg = ix
+
+
+    label = "Subtract Image Component (73224.4 MB, 67.14 Tflop) "
+    print(label + str(ixg))
+    return iter(result)
 
 def source_find_kernel(ixs):
 	Hash = 0
@@ -520,26 +591,6 @@ def source_find_kernel(ixs):
 	Hash ^= hash(label)
 	print(label + " (hash " + hex(Hash) + " from " + str(input_size / 1000000) + " MB input)")
 	result = np.zeros(max(1, int(scale_data * 19200)), int)
-	result[0] = Hash
-	return iter([(ix, result)])
-
-def subimacom_kernel(ixs):
-	Hash = 0
-	input_size = 0
-	ix = (0, 0, 0, 0)
-	# for temp in ixs:
-	# 	ix, (data_identify_component, data_sum_facets) = temp
-	# 	for data in data_identify_component:
-	# 		Hash ^= data[0]
-	# 		input_size += 1
-	# 	for data in data_sum_facets:
-	# 		Hash ^= data[0]
-	# 		input_size += 1
-
-	label = "Subtract Image Component (73224.4 MB, 67.14 Tflop) " + str(ix).replace(" ", "")
-	Hash ^= hash(label)
-	print(label + " (hash " + hex(Hash) + " from " + str(input_size / 1000000) + " MB input)")
-	result = np.zeros(max(1, int(scale_data * 244081369)), int)
 	result[0] = Hash
 	return iter([(ix, result)])
 
@@ -609,29 +660,22 @@ def serialize_program():
     gaintable = solve_gaintable(blockvis_observed, model_vis)
     apply_gaintable(blockvis_observed, gaintable)
     blockvis_observed.data['vis'] = blockvis_observed.data['vis'] - model_vis.data['vis']
-    visibility = coalesce_visibility(blockvis_observed)  # 空的image，接受visibility的invert
+    visibility = coalesce_visibility(blockvis_observed, time_coal=metadata.time_coal, frequency_coal=metadata.frequency_coal)
     result.append(visibility)
     #---backwards_module---#
     image = create_image(metadata.NY, metadata.NX, frequency=frequency, phasecentre=phasecentre, cellsize=0.001,
-                         polarisation_frame=metadata.create_polarisation_frame())
+                         polarisation_frame=metadata.create_polarisation_frame()) # 空的image，接受visibility的invert
     image, wt = invert_facets(visibility, image, facets=metadata.FACETS)
 
     psf_image = create_image(metadata.NY, metadata.NX, frequency=frequency, phasecentre=phasecentre, cellsize=0.001,
                              polarisation_frame=metadata.create_polarisation_frame())
     psf_image, psf_wt = invert_facets(visibility, psf_image, dopsf=True, facets=metadata.FACETS)
-
-    dirty_image = Image()
-    dirty_image.wcs = image.wcs
-    dirty_image.polarisation_frame = image.polarisation_frame
-    dirty_image.data = np.sum(image.data, axis=0).reshape((1, metadata.NPOL, metadata.NY, metadata.NX)) * 4
-    result.append(dirty_image)
+    dirty_taylor, psf_taylor = deconvolve_cube_sumfacet(image, psf_image, moments=metadata.MOMENTS)
+    result.append((dirty_taylor, psf_taylor))
 
     #---deconvolution_module---#
-
-
-    comp_image, residual_image = deconvolve_cube(image, psf_image, algorithm="mfsmsclean")
+    comp_image, residual_image = deconvolve_cube_identify(image, dirty_taylor, psf_taylor, niter=metadata.niter)
     result.append((comp_image, residual_image))
-
 
     return result
 
@@ -645,11 +689,14 @@ def create_vis_share():
 
 
 if __name__ == '__main__':
+    print(is_valid)
     # conf = SparkConf().set("spark.eventLog.enabled", "true").set("spark.eventLog.dir","/home/hadoop/arl_temp/uilog")
     conf = SparkConf().setMaster("local[4]").setAppName("io")
     sc = SparkContext(conf=conf)
     sc.addFile("./data/configurations/LOWBD2-CORE.csv")
-    result = serialize_program()
+    if is_valid["-1"] == True:
+        result = serialize_program()
+
     # === Extract Lsm ===
     extract_lsm = extract_lsm_handle()
     broadcast_lsm = sc.broadcast(extract_lsm.collect())
@@ -674,12 +721,15 @@ if __name__ == '__main__':
     pharotpre_dft_sumvis = pharotpre_dft_sumvis_handle(degrid, broadcast_lsm)
     pharotpre_dft_sumvis.cache()
     broads_input0 = sc.broadcast(pharotpre_dft_sumvis.collect())
+
     # 验证predict module的正确性
-    # phase_vis = pharotpre_dft_sumvis.collect()
-    # vis_share = create_vis_share()
-    # vis_share.phasecentre = phase_vis[0][1].phasecentre
-    # back_visibility = visibility_para_to_visibility(phase_vis, vis_share, mode="1to1")
-    # visibility_right(result[0], back_visibility)
+    if is_valid["0"] == True:
+        phase_vis = pharotpre_dft_sumvis.collect()
+        vis_share = create_vis_share()
+        vis_share.phasecentre = phase_vis[0][1].phasecentre
+        back_visibility = visibility_para_to_visibility(phase_vis, vis_share, mode="1to1")
+        visibility_right(result[0], back_visibility)
+
 
     #  === Timeslots ===
     timeslots = timeslots_handle(broads_input0, broads_input1)
@@ -692,13 +742,14 @@ if __name__ == '__main__':
     cor_subvis_flag = cor_subvis_flag_handle(broads_input0, broads_input1, broads_input2)
     cor_subvis_flag.cache()
     broads_input = sc.broadcast(cor_subvis_flag.collect())
-    # 验证solve module的正确性
-    # subtract_vis = cor_subvis_flag.collect()
-    # vis_share = create_vis_share()
-    # vis_share.phasecentre = subtract_vis[0][1].phasecentre
-    # back_visibility = visibility_para_to_visibility(subtract_vis, vis_share, mode="1to1")
-    # visibility_right(result[1], back_visibility)
 
+    # 验证calibration module的正确性
+    if is_valid["1"] == True:
+        subtract_vis = cor_subvis_flag.collect()
+        vis_share = create_vis_share()
+        vis_share.phasecentre = subtract_vis[0][1].phasecentre
+        back_visibility = visibility_para_to_visibility(subtract_vis, vis_share, mode="1to1")
+        visibility_right(result[1], back_visibility)
 
 
     # === Gridding Kernel Update + Phase Rotation + Grid + FFT + Rreprojection ===
@@ -707,21 +758,57 @@ if __name__ == '__main__':
     # ===Sum Facets ===
     sum_facets = sum_facets_handle(grikerupd_pharot_grid_fft_rep)
     sum_facets.cache()
-    # 验证sum module的正确性
-    sum_image = sum_facets.collect()
-    img_share = image_share(metadata.POLARISATION_FRAME, result[2].wcs, 1, metadata.NPOL, metadata.NY, metadata.NX)
-    back_image = image_para_to_image(sum_image, img_share)
-    image_right(result[2], back_image, precision=metadata.PRECISION)
 
+    # 验证backwards module的正确性
+    if is_valid["2"] == True:
+        sum_image = sum_facets.collect()
+        dirty_imgs = []
+        psf_imgs = []
+        for imgs in sum_image:
+            for img in imgs[1][0]:
+                dirty_imgs.append(img)
+            for psf_img in imgs[1][1]:
+                psf_imgs.append(psf_img)
 
+        img_share = image_share(metadata.POLARISATION_FRAME, metadata.create_moment_wcs(), metadata.MOMENTS, metadata.NPOL, metadata.NY, metadata.NX)
+        back_dirty_image = image_para_to_image(dirty_imgs, img_share)
+        img_share.nchan = metadata.MOMENTS * 2
+        back_psf_image = image_para_to_image(psf_imgs, img_share)
 
-	# === Identify Component ===
-	# identify_component = identify_component_handle(sum_facets)
+        dirty_taylor, psf_taylor = result[2]
+        image_right(dirty_taylor, back_dirty_image, precision=metadata.PRECISION)
+        image_right(psf_taylor, back_psf_image, precision=metadata.PRECISION)
+
+    # === deconvolution ===
+    Identify_component = None
+    for i in range(metadata.niter):
+        Subimacom = subimacom_handle(sum_facets, Identify_component, i)
+        # === Identify Component ===
+        Identify_component = identify_component_handle(sum_facets, Subimacom, i)
+
+    # 验证deconvulition module的正确性
+    if is_valid["3"] == True:
+        identify_image = Identify_component.collect()
+        comp_imgs = []
+        residual_imgs = []
+        for imgs in identify_image:
+            for img in imgs[1][0]:
+                comp_imgs.append(img)
+            for residual_img in imgs[1][1]:
+                residual_imgs.append(residual_img)
+
+        img_share = image_share(metadata.POLARISATION_FRAME, metadata.create_wcs(), metadata.NCHAN, metadata.NPOL, metadata.NY, metadata.NX)
+        back_comp_image = image_para_to_image(comp_imgs, img_share)
+        back_residual_image = image_para_to_image(residual_imgs, img_share)
+
+        comp_image, residual_image = result[3]
+        image_right(comp_image, back_comp_image, precision=metadata.PRECISION)
+        image_right(residual_image, back_residual_image, precision=metadata.PRECISION)
+
+    Identify_component.collect()
+
 	# # === Source Find ===
 	# source_find = source_find_handle(identify_component)
-	# # === Substract Image Component ===
-	# subimacom = subimacom_handle(sum_facets, identify_component)
-
 	# # === Update LSM ===
 	# update_lsm = update_lsm_handle(local_sky_model, source_find)
 

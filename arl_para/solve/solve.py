@@ -25,10 +25,7 @@ def vis_timeslice_iter_para(vis: visibility_for_para, time, **kwargs) -> numpy.n
     return rows
 
 def copy_visibility(vis: Union[Visibility, BlockVisibility], zero=False) -> Union[Visibility, BlockVisibility]:
-    """Copy a visibility
 
-    Performs a deepcopy of the data array
-    """
     newvis = copy.copy(vis)
     newvis.data = copy.deepcopy(vis.data)
     if zero:
@@ -232,19 +229,12 @@ def solve_antenna_gains_itsubs_vector(gainshape, x, xwt, niter=30, tol=1e-8, pha
     newshape = (nants, nants, nchan, 2, 2)
     x = x.reshape(newshape)
     xwt = xwt.reshape(newshape)
-    # print(x)
-    # print(100*'-')
-    # print(xwt)
     for ant1 in range(nants):
         x[ant1, ant1, ...] = 0.0
         xwt[ant1, ant1, ...] = 0.0
         for ant2 in range(ant1 + 1, nants):
             x[ant1, ant2, ...] = numpy.conjugate(x[ant2, ant1, ...])
             xwt[ant1, ant2, ...] = xwt[ant2, ant1, ...]
-    # print(100 * '-')
-    # print(x)
-    # print(100 * '-')
-    # print(xwt)
     gain = numpy.ones(shape=gainshape, dtype=x.dtype)
     gain[..., 0, 1] = 0.0
     gain[..., 1, 0] = 0.0

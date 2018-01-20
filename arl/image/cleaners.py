@@ -460,11 +460,13 @@ def msmfsclean(dirty, psf, window, gain, thresh, niter, scales, fracthresh, find
     # Start iterations
     scale_counts = numpy.zeros(nscales, dtype='int')
     scale_flux = numpy.zeros(nscales)
-    
+
+
     for i in range(niter):
-        
+        # smresidual 作为参数从identify阶段传到subimacom阶段，mscale,mx,my,mval作为参数从subimacom阶段传到identify阶段
         # Find the optimum scale and location.
         mscale, mx, my, mval = find_global_optimum(hsmmpsf, ihsmmpsf, smresidual, windowstack, findpeak)
+
         scale_counts[mscale] += 1
         scale_flux[mscale] += mval[0]
         
@@ -486,7 +488,7 @@ def msmfsclean(dirty, psf, window, gain, thresh, niter, scales, fracthresh, find
         # Update model and residual image
         m_model = update_moment_model(m_model, scalestack, lhs, rhs, gain, mscale, mval)
         smresidual = update_scale_moment_residual(smresidual, ssmmpsf, lhs, rhs, gain, mscale, mval)
-    
+
     log.info("msmfsclean: End of minor cycles")
     
     log.info("msmfsclean: Scale counts %s" % (scale_counts))
@@ -609,6 +611,8 @@ def calculate_scale_inverse_moment_moment_hessian(scale_scale_moment_moment_psf)
     scale_moment_moment_hessian = numpy.zeros(hessian_shape)
     scale_inverse_moment_moment_hessian = numpy.zeros(hessian_shape)
     for s in range(nscales):
+        # 精度问题导致无法对比，故round
+        # scale_moment_moment_hessian[s, ...] = numpy.round(scale_scale_moment_moment_psf[s, s, ..., nx // 2, ny // 2], 5)
         scale_moment_moment_hessian[s, ...] = scale_scale_moment_moment_psf[s, s, ..., nx // 2, ny // 2]
         scale_inverse_moment_moment_hessian[s] = numpy.linalg.inv(scale_moment_moment_hessian[s])
     return scale_moment_moment_hessian, scale_inverse_moment_moment_hessian
