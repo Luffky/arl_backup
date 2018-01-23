@@ -26,7 +26,7 @@ os.environ["PYSPARK_PYTHON"]="/usr/local/bin/python3"
 def parse_console_arg():
     opts, args = getopt.getopt(sys.argv[1:], "a:p:f:c:t:v:")
     ret = {"nan":3, "nchan":2, "npix":256, "nfacet":2, "ntime":2}
-    is_valid = {"-1": True, "0": False, "1": False, "2": False, "3": False}
+    is_valid = {"-1": False, "0": False, "1": False, "2": False, "3": False}
     for op, value in opts:
         if op == "-a":
             ret["nan"] = int(value)
